@@ -1,0 +1,155 @@
+---
+description: Python development standards including FastAPI, Pydantic, type hints, and testing patterns.
+globs: ["*.py", "**/*.py"]
+alwaysApply: false
+---
+
+# Python Engineering Rules
+
+## Code Style
+- Follow PEP 8 with 88-char line length (Black compatible)
+- Use type hints for all function signatures
+- Prefer f-strings over .format() or %
+- Use pathlib over os.path
+
+## Type Hints
+```python
+# Always type function signatures
+def get_user(user_id: int) -> User | None:
+    ...
+
+# Use modern union syntax (3.10+)
+def process(data: str | bytes) -> dict[str, Any]:
+    ...
+
+# Type class attributes
+class Config:
+    debug: bool = False
+    max_retries: int = 3
+```
+
+## Pydantic Models
+```python
+from pydantic import BaseModel, Field, ConfigDict
+
+class UserCreate(BaseModel):
+    model_config = ConfigDict(strict=True)
+    
+    email: str = Field(..., description="User email address")
+    name: str = Field(..., min_length=1, max_length=100)
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    email: str
+    name: str
+    created_at: datetime
+```
+
+## FastAPI Patterns
+```python
+from fastapi import APIRouter, Depends, HTTPException, status
+
+router = APIRouter(prefix="/users", tags=["users"])
+
+@router.get("/{user_id}", response_model=UserResponse)
+async def get_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found"
+        )
+    return user
+```
+
+## Error Handling
+```python
+# Use specific exceptions
+class UserNotFoundError(Exception):
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        super().__init__(f"User {user_id} not found")
+
+# Early returns for validation
+def process_order(order: Order) -> Result:
+    if not order.items:
+        return Result.error("Order has no items")
+    if order.total <= 0:
+        return Result.error("Invalid order total")
+    
+    # Happy path last
+    return Result.success(execute_order(order))
+```
+
+## Testing (pytest)
+```python
+import pytest
+from unittest.mock import AsyncMock, patch
+
+@pytest.fixture
+def mock_db():
+    return AsyncMock()
+
+async def test_get_user_found(mock_db):
+    # Arrange
+    mock_db.get.return_value = User(id=1, name="Test")
+    
+    # Act
+    result = await get_user(1, mock_db)
+    
+    # Assert
+    assert result.id == 1
+    mock_db.get.assert_called_once_with(User, 1)
+
+async def test_get_user_not_found(mock_db):
+    mock_db.get.return_value = None
+    
+    with pytest.raises(HTTPException) as exc:
+        await get_user(999, mock_db)
+    
+    assert exc.value.status_code == 404
+```
+
+## Imports
+```python
+# Standard library
+import os
+from datetime import datetime
+from typing import Any
+
+# Third-party
+from fastapi import FastAPI
+from pydantic import BaseModel
+from sqlalchemy import select
+
+# Local
+from app.models import User
+from app.config import settings
+```
+
+## Logging
+```python
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+async def process_payment(payment_id: int) -> None:
+    logger.info("processing_payment", payment_id=payment_id)
+    try:
+        result = await execute_payment(payment_id)
+        logger.info("payment_complete", payment_id=payment_id, amount=result.amount)
+    except PaymentError as e:
+        logger.error("payment_failed", payment_id=payment_id, error=str(e))
+        raise
+```
+
+## Async Patterns
+- Use `async/await` for I/O operations
+- Use `asyncio.gather()` for concurrent operations
+- Avoid blocking calls in async functions
+- Use connection pools for database connections

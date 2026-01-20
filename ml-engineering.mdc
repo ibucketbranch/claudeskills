@@ -1,0 +1,265 @@
+---
+description: Machine Learning engineering standards including model development, experiment tracking, and production deployment patterns.
+globs: ["*.py", "**/ml/**", "**/models/**", "**/training/**"]
+alwaysApply: false
+---
+
+# ML Engineering Rules
+
+## Project Structure
+```
+project/
+├── configs/           # Experiment configurations
+├── data/
+│   ├── raw/          # Immutable original data
+│   ├── processed/    # Cleaned/transformed data
+│   └── features/     # Feature stores
+├── models/
+│   ├── trained/      # Serialized models
+│   └── artifacts/    # Training artifacts
+├── notebooks/        # Exploration only, not production
+├── src/
+│   ├── data/         # Data loading and processing
+│   ├── features/     # Feature engineering
+│   ├── models/       # Model definitions
+│   ├── training/     # Training loops
+│   └── evaluation/   # Metrics and evaluation
+├── tests/
+└── scripts/          # CLI scripts for training/eval
+```
+
+## Configuration Management
+```python
+from pydantic import BaseModel
+from pathlib import Path
+
+class ModelConfig(BaseModel):
+    """Immutable, serializable configuration."""
+    model_name: str
+    hidden_size: int = 768
+    num_layers: int = 12
+    dropout: float = 0.1
+    learning_rate: float = 1e-4
+    batch_size: int = 32
+    max_epochs: int = 100
+
+class ExperimentConfig(BaseModel):
+    model: ModelConfig
+    data_path: Path
+    output_dir: Path
+    seed: int = 42
+    
+# Load from YAML/JSON
+config = ExperimentConfig.model_validate_json(config_path.read_text())
+```
+
+## Reproducibility
+```python
+import random
+import numpy as np
+import torch
+
+def set_seed(seed: int) -> None:
+    """Set all random seeds for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+# Always log:
+# - Git commit hash
+# - Config file
+# - Environment (pip freeze)
+# - Hardware info
+```
+
+## Data Pipeline
+```python
+from torch.utils.data import Dataset, DataLoader
+from typing import Iterator
+
+class TrainingDataset(Dataset):
+    """Always inherit from Dataset for PyTorch."""
+    
+    def __init__(self, data_path: Path, transform=None):
+        self.data = self._load_data(data_path)
+        self.transform = transform
+    
+    def __len__(self) -> int:
+        return len(self.data)
+    
+    def __getitem__(self, idx: int) -> dict:
+        item = self.data[idx]
+        if self.transform:
+            item = self.transform(item)
+        return item
+
+def create_dataloaders(
+    config: ExperimentConfig,
+) -> tuple[DataLoader, DataLoader]:
+    """Factory function for train/val loaders."""
+    train_ds = TrainingDataset(config.data_path / "train")
+    val_ds = TrainingDataset(config.data_path / "val")
+    
+    return (
+        DataLoader(train_ds, batch_size=config.model.batch_size, shuffle=True),
+        DataLoader(val_ds, batch_size=config.model.batch_size, shuffle=False),
+    )
+```
+
+## Model Definition
+```python
+import torch.nn as nn
+
+class TransformerModel(nn.Module):
+    """Clear, documented model architecture."""
+    
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+        
+        self.embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList([
+            TransformerLayer(config) for _ in range(config.num_layers)
+        ])
+        self.output = nn.Linear(config.hidden_size, config.num_classes)
+        
+        self._init_weights()
+    
+    def _init_weights(self) -> None:
+        """Initialize weights following best practices."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch, seq_len)
+        Returns:
+            Logits of shape (batch, num_classes)
+        """
+        h = self.embedding(x)
+        for layer in self.layers:
+            h = layer(h)
+        return self.output(h[:, 0])  # CLS token
+```
+
+## Training Loop
+```python
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import wandb
+
+def train(
+    model: nn.Module,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    config: ExperimentConfig,
+) -> None:
+    """Training loop with validation and logging."""
+    
+    optimizer = AdamW(model.parameters(), lr=config.model.learning_rate)
+    scheduler = CosineAnnealingLR(optimizer, T_max=config.model.max_epochs)
+    
+    best_val_loss = float('inf')
+    
+    for epoch in range(config.model.max_epochs):
+        # Training
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            optimizer.zero_grad()
+            loss = compute_loss(model, batch)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            train_loss += loss.item()
+        
+        # Validation
+        val_loss, val_metrics = evaluate(model, val_loader)
+        scheduler.step()
+        
+        # Logging
+        wandb.log({
+            "epoch": epoch,
+            "train_loss": train_loss / len(train_loader),
+            "val_loss": val_loss,
+            **val_metrics,
+        })
+        
+        # Checkpointing
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(model, config.output_dir / "best_model.pt")
+```
+
+## Evaluation
+```python
+from sklearn.metrics import precision_recall_fscore_support
+
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+) -> tuple[float, dict]:
+    """Evaluate model and return metrics."""
+    model.eval()
+    
+    all_preds = []
+    all_labels = []
+    total_loss = 0.0
+    
+    for batch in dataloader:
+        logits = model(batch["input"])
+        loss = compute_loss(model, batch)
+        total_loss += loss.item()
+        
+        preds = logits.argmax(dim=-1)
+        all_preds.extend(preds.cpu().numpy())
+        all_labels.extend(batch["labels"].cpu().numpy())
+    
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels, all_preds, average="weighted"
+    )
+    
+    return total_loss / len(dataloader), {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+```
+
+## Experiment Tracking
+```python
+import wandb
+
+def init_experiment(config: ExperimentConfig) -> None:
+    """Initialize experiment tracking."""
+    wandb.init(
+        project="my-ml-project",
+        config=config.model_dump(),
+        tags=["baseline", config.model.model_name],
+    )
+    
+    # Log code
+    wandb.run.log_code(".")
+    
+    # Log artifacts
+    artifact = wandb.Artifact("dataset", type="dataset")
+    artifact.add_dir(config.data_path)
+    wandb.log_artifact(artifact)
+```
+
+## Production Checklist
+- [ ] Model serialization tested (load after save)
+- [ ] Inference latency benchmarked
+- [ ] Memory usage profiled
+- [ ] Input validation added
+- [ ] Error handling for edge cases
+- [ ] Monitoring/alerting configured
+- [ ] A/B test framework ready
+- [ ] Rollback procedure documented

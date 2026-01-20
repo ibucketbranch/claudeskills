@@ -1,0 +1,422 @@
+---
+description: Comprehensive ML/AI stack covering PyTorch, Hugging Face Transformers, TensorFlow/Keras, scikit-learn, NumPy, and Pandas. Core patterns for model development, training, and evaluation.
+globs: ["*.py", "**/ml/**", "**/models/**", "**/training/**", "**/notebooks/**"]
+alwaysApply: false
+---
+
+# ML Stack Rules
+
+## Framework Priority
+1. **PyTorch** — Primary framework (🔥 most important)
+2. **Hugging Face Transformers** — NLP/LLM tasks
+3. **TensorFlow/Keras** — When required by existing code
+4. **Scikit-learn** — Classical ML, preprocessing, evaluation
+
+## NumPy Patterns
+```python
+import numpy as np
+
+# Always specify dtype explicitly
+arr = np.zeros((batch_size, seq_len), dtype=np.float32)
+
+# Vectorize over loops
+# Bad
+result = [compute(x) for x in data]
+# Good
+result = np.vectorize(compute)(data)
+# Best - use native numpy ops
+result = np.where(data > 0, data, 0)
+
+# Broadcasting
+# Normalize columns
+normalized = (data - data.mean(axis=0)) / data.std(axis=0)
+
+# Memory efficiency
+# Use views, not copies when possible
+subset = arr[::2]  # View
+subset = arr[::2].copy()  # Explicit copy when needed
+
+# Random seed for reproducibility
+rng = np.random.default_rng(seed=42)
+samples = rng.random((100, 10))
+```
+
+## Pandas Patterns
+```python
+import pandas as pd
+
+# Read with explicit types
+df = pd.read_csv(
+    "data.csv",
+    dtype={"id": "int64", "category": "category"},
+    parse_dates=["timestamp"],
+)
+
+# Chain operations
+result = (
+    df
+    .query("value > 0")
+    .assign(log_value=lambda x: np.log1p(x["value"]))
+    .groupby("category", observed=True)
+    .agg({"log_value": ["mean", "std"]})
+    .reset_index()
+)
+
+# Avoid iterrows - use vectorized ops or apply
+# Bad
+for idx, row in df.iterrows():
+    df.loc[idx, "new"] = compute(row["a"], row["b"])
+# Good
+df["new"] = df.apply(lambda r: compute(r["a"], r["b"]), axis=1)
+# Best
+df["new"] = np.where(df["a"] > 0, df["a"] * df["b"], 0)
+
+# Memory optimization
+df["category_col"] = df["category_col"].astype("category")
+df = df.convert_dtypes()  # Use nullable dtypes
+```
+
+## PyTorch (🔥 Primary Framework)
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
+# Device handling
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Model definition
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.1):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(d_model, n_heads, dropout=dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Linear(4 * d_model, d_model),
+            nn.Dropout(dropout),
+        )
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        # Pre-norm architecture
+        attn_out, _ = self.attention(
+            self.norm1(x), self.norm1(x), self.norm1(x), 
+            attn_mask=mask
+        )
+        x = x + self.dropout(attn_out)
+        x = x + self.ffn(self.norm2(x))
+        return x
+
+# Training loop
+def train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> float:
+    model.train()
+    total_loss = 0.0
+    
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        
+        optimizer.zero_grad()
+        outputs = model(**batch)
+        loss = outputs.loss
+        loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        total_loss += loss.item()
+    
+    return total_loss / len(loader)
+
+# Mixed precision training
+from torch.cuda.amp import autocast, GradScaler
+
+scaler = GradScaler()
+
+for batch in loader:
+    optimizer.zero_grad()
+    
+    with autocast():
+        outputs = model(**batch)
+        loss = outputs.loss
+    
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+
+# Distributed training
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+def setup_distributed(rank: int, world_size: int):
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+model = DDP(model.to(rank), device_ids=[rank])
+```
+
+## Hugging Face Transformers
+```python
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorWithPadding,
+)
+from datasets import load_dataset, Dataset
+
+# Load pretrained model
+model_name = "bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSequenceClassification.from_pretrained(
+    model_name,
+    num_labels=2,
+    torch_dtype=torch.float16,  # Use half precision
+)
+
+# Tokenization
+def tokenize_function(examples):
+    return tokenizer(
+        examples["text"],
+        padding="max_length",
+        truncation=True,
+        max_length=512,
+    )
+
+dataset = load_dataset("imdb")
+tokenized_dataset = dataset.map(tokenize_function, batched=True)
+
+# Training with Trainer
+training_args = TrainingArguments(
+    output_dir="./results",
+    num_train_epochs=3,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=64,
+    warmup_steps=500,
+    weight_decay=0.01,
+    logging_dir="./logs",
+    logging_steps=100,
+    evaluation_strategy="steps",
+    eval_steps=500,
+    save_strategy="steps",
+    save_steps=500,
+    load_best_model_at_end=True,
+    fp16=True,
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_dataset["train"],
+    eval_dataset=tokenized_dataset["test"],
+    data_collator=DataCollatorWithPadding(tokenizer),
+)
+
+trainer.train()
+
+# LLM inference
+from transformers import pipeline
+
+generator = pipeline(
+    "text-generation",
+    model="meta-llama/Llama-2-7b-hf",
+    torch_dtype=torch.float16,
+    device_map="auto",
+)
+
+output = generator(
+    "The future of AI is",
+    max_new_tokens=100,
+    do_sample=True,
+    temperature=0.7,
+    top_p=0.9,
+)
+
+# PEFT / LoRA
+from peft import get_peft_model, LoraConfig, TaskType
+
+peft_config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    r=8,
+    lora_alpha=32,
+    lora_dropout=0.1,
+    target_modules=["q_proj", "v_proj"],
+)
+
+model = get_peft_model(model, peft_config)
+model.print_trainable_parameters()
+```
+
+## TensorFlow / Keras
+```python
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+# Model definition
+def create_model(input_shape: tuple, num_classes: int) -> keras.Model:
+    inputs = keras.Input(shape=input_shape)
+    
+    x = layers.Conv2D(32, 3, activation="relu")(inputs)
+    x = layers.MaxPooling2D()(x)
+    x = layers.Conv2D(64, 3, activation="relu")(x)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dense(128, activation="relu")(x)
+    x = layers.Dropout(0.5)(x)
+    outputs = layers.Dense(num_classes, activation="softmax")(x)
+    
+    return keras.Model(inputs, outputs)
+
+# Compile and train
+model = create_model((224, 224, 3), 10)
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=1e-4),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"],
+)
+
+# Callbacks
+callbacks = [
+    keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True),
+    keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=3),
+    keras.callbacks.ModelCheckpoint("best_model.keras", save_best_only=True),
+    keras.callbacks.TensorBoard(log_dir="./logs"),
+]
+
+history = model.fit(
+    train_dataset,
+    validation_data=val_dataset,
+    epochs=50,
+    callbacks=callbacks,
+)
+
+# Mixed precision
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
+# Distributed training
+strategy = tf.distribute.MirroredStrategy()
+with strategy.scope():
+    model = create_model(input_shape, num_classes)
+    model.compile(...)
+```
+
+## Scikit-learn
+```python
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import classification_report, confusion_matrix
+
+# Data split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Pipeline
+pipeline = Pipeline([
+    ("scaler", StandardScaler()),
+    ("classifier", RandomForestClassifier(random_state=42)),
+])
+
+# Cross-validation
+scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring="f1_weighted")
+print(f"CV F1: {scores.mean():.3f} ± {scores.std():.3f}")
+
+# Hyperparameter tuning
+param_grid = {
+    "classifier__n_estimators": [100, 200, 500],
+    "classifier__max_depth": [None, 10, 20],
+    "classifier__min_samples_split": [2, 5, 10],
+}
+
+grid_search = GridSearchCV(
+    pipeline, param_grid, cv=5, scoring="f1_weighted", n_jobs=-1
+)
+grid_search.fit(X_train, y_train)
+
+print(f"Best params: {grid_search.best_params_}")
+print(f"Best CV score: {grid_search.best_score_:.3f}")
+
+# Evaluation
+y_pred = grid_search.predict(X_test)
+print(classification_report(y_test, y_pred))
+```
+
+## Feature Engineering
+```python
+from sklearn.preprocessing import (
+    StandardScaler, MinMaxScaler, RobustScaler,
+    OneHotEncoder, OrdinalEncoder,
+    PolynomialFeatures,
+)
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer, KNNImputer
+
+# Column transformer for mixed types
+numeric_features = ["age", "income", "score"]
+categorical_features = ["category", "region"]
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", Pipeline([
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ]), numeric_features),
+        ("cat", Pipeline([
+            ("imputer", SimpleImputer(strategy="constant", fill_value="missing")),
+            ("encoder", OneHotEncoder(handle_unknown="ignore")),
+        ]), categorical_features),
+    ]
+)
+
+# Full pipeline
+full_pipeline = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", RandomForestClassifier()),
+])
+```
+
+## Evaluation Metrics
+```python
+from sklearn.metrics import (
+    accuracy_score, precision_recall_fscore_support,
+    roc_auc_score, average_precision_score,
+    mean_squared_error, mean_absolute_error, r2_score,
+)
+
+# Classification
+precision, recall, f1, _ = precision_recall_fscore_support(
+    y_true, y_pred, average="weighted"
+)
+roc_auc = roc_auc_score(y_true, y_prob, multi_class="ovr")
+
+# Regression
+mse = mean_squared_error(y_true, y_pred)
+rmse = mean_squared_error(y_true, y_pred, squared=False)
+mae = mean_absolute_error(y_true, y_pred)
+r2 = r2_score(y_true, y_pred)
+
+# Custom metrics
+def custom_metric(y_true, y_pred):
+    # Your metric logic
+    return score
+```
+
+## Model Selection Hierarchy
+1. **Start simple**: Logistic Regression / Linear Regression
+2. **Add complexity**: Random Forest / Gradient Boosting
+3. **Deep learning**: When data is large and patterns are complex
+4. **Transformers**: For NLP, sequence data, or when transfer learning helps
+5. **Custom architectures**: When off-the-shelf doesn't fit

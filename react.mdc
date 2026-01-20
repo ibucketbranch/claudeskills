@@ -1,0 +1,199 @@
+---
+description: React and TypeScript development standards including hooks, components, and Tailwind CSS patterns.
+globs: ["*.tsx", "*.jsx", "**/*.tsx", "**/*.jsx"]
+alwaysApply: false
+---
+
+# React Engineering Rules
+
+## Component Structure
+```tsx
+// Functional components only
+// Props interface above component
+// Hooks at top, handlers next, render last
+
+interface UserCardProps {
+  user: User;
+  onSelect?: (userId: string) => void;
+}
+
+export function UserCard({ user, onSelect }: UserCardProps) {
+  // 1. Hooks
+  const [isExpanded, setIsExpanded] = useState(false);
+  const { data, isLoading } = useUserDetails(user.id);
+
+  // 2. Derived state
+  const displayName = user.name || user.email;
+
+  // 3. Handlers
+  const handleClick = useCallback(() => {
+    onSelect?.(user.id);
+  }, [user.id, onSelect]);
+
+  // 4. Early returns
+  if (isLoading) return <Skeleton />;
+
+  // 5. Render
+  return (
+    <div onClick={handleClick}>
+      {displayName}
+    </div>
+  );
+}
+```
+
+## TypeScript Patterns
+```tsx
+// Prefer interface for props
+interface Props {
+  title: string;
+  children: React.ReactNode;
+}
+
+// Use type for unions/complex types
+type Status = 'idle' | 'loading' | 'success' | 'error';
+
+// Infer types when possible
+const items = ['a', 'b'] as const; // readonly tuple
+
+// Generic components
+interface ListProps<T> {
+  items: T[];
+  renderItem: (item: T) => React.ReactNode;
+}
+
+function List<T>({ items, renderItem }: ListProps<T>) {
+  return <>{items.map(renderItem)}</>;
+}
+```
+
+## Hooks
+```tsx
+// Custom hooks for reusable logic
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedValue(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
+// useCallback for handlers passed to children
+const handleSubmit = useCallback((data: FormData) => {
+  mutate(data);
+}, [mutate]);
+
+// useMemo for expensive computations
+const sortedItems = useMemo(
+  () => items.sort((a, b) => a.name.localeCompare(b.name)),
+  [items]
+);
+```
+
+## State Management
+```tsx
+// Local state for UI concerns
+const [isOpen, setIsOpen] = useState(false);
+
+// Server state with React Query/SWR
+const { data, isLoading, error } = useQuery({
+  queryKey: ['users', userId],
+  queryFn: () => fetchUser(userId),
+});
+
+// Form state with controlled inputs
+const [formData, setFormData] = useState<FormData>({
+  email: '',
+  name: '',
+});
+
+const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
+  const { name, value } = e.target;
+  setFormData(prev => ({ ...prev, [name]: value }));
+};
+```
+
+## Tailwind CSS
+```tsx
+// Use className directly, not string concatenation
+<div className="flex items-center gap-4 p-4 bg-white rounded-lg shadow">
+
+// Conditional classes with template literals or clsx
+<button
+  className={`px-4 py-2 rounded ${
+    isActive ? 'bg-blue-500 text-white' : 'bg-gray-100'
+  }`}
+>
+
+// Extract repeated patterns to components, not @apply
+function Card({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="p-4 bg-white rounded-lg shadow-md">
+      {children}
+    </div>
+  );
+}
+```
+
+## Error Handling
+```tsx
+// Error boundaries for component trees
+class ErrorBoundary extends Component<Props, State> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <ErrorFallback />;
+    }
+    return this.props.children;
+  }
+}
+
+// Async error handling
+const { data, error } = useQuery({ ... });
+
+if (error) {
+  return <ErrorMessage error={error} />;
+}
+```
+
+## Testing
+```tsx
+import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+
+test('submits form with user data', async () => {
+  const onSubmit = vi.fn();
+  render(<UserForm onSubmit={onSubmit} />);
+
+  await userEvent.type(screen.getByLabelText(/email/i), 'test@example.com');
+  await userEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+  expect(onSubmit).toHaveBeenCalledWith({ email: 'test@example.com' });
+});
+```
+
+## File Organization
+```
+src/
+├── components/
+│   ├── ui/          # Reusable primitives (Button, Input)
+│   └── features/    # Feature-specific components
+├── hooks/           # Custom hooks
+├── lib/             # Utilities, API clients
+├── types/           # Shared TypeScript types
+└── pages/           # Route components (Next.js/Remix)
+```
+
+## Performance
+- Avoid inline object/array creation in props
+- Use React.memo for expensive pure components
+- Lazy load routes and heavy components
+- Virtualize long lists (react-window)

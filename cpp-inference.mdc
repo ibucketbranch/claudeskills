@@ -1,0 +1,334 @@
+---
+description: C++ development standards for ML inference optimization, CUDA kernels, and high-performance computing. Use for inference engines, model optimization, and silicon-aware design.
+globs: ["*.cpp", "*.hpp", "*.cu", "*.cuh", "**/*.cpp", "**/*.hpp"]
+alwaysApply: false
+---
+
+# C++ Inference Optimization Rules
+
+## Project Structure
+```
+inference/
+├── include/
+│   ├── model.hpp
+│   ├── tensor.hpp
+│   └── kernels/
+├── src/
+│   ├── model.cpp
+│   ├── tensor.cpp
+│   └── kernels/
+├── cuda/
+│   ├── gemm.cu
+│   └── attention.cu
+├── tests/
+├── benchmarks/
+└── CMakeLists.txt
+```
+
+## Modern C++ Standards (C++17/20)
+```cpp
+#include <memory>
+#include <span>
+#include <optional>
+#include <variant>
+
+// Use smart pointers
+auto model = std::make_unique<Model>(config);
+auto shared_weights = std::make_shared<Tensor>(shape);
+
+// Use std::span for non-owning views
+void process(std::span<const float> data) {
+    for (auto val : data) { /* ... */ }
+}
+
+// Use std::optional for nullable returns
+std::optional<Tensor> maybe_load(const std::string& path) {
+    if (!exists(path)) return std::nullopt;
+    return Tensor::load(path);
+}
+
+// Use constexpr for compile-time computation
+constexpr size_t TILE_SIZE = 32;
+constexpr size_t align_to(size_t n, size_t alignment) {
+    return (n + alignment - 1) / alignment * alignment;
+}
+```
+
+## Memory Management
+```cpp
+// RAII for all resources
+class TensorBuffer {
+public:
+    explicit TensorBuffer(size_t size) 
+        : data_(aligned_alloc(64, size)), size_(size) {
+        if (!data_) throw std::bad_alloc();
+    }
+    
+    ~TensorBuffer() { free(data_); }
+    
+    // Delete copy, enable move
+    TensorBuffer(const TensorBuffer&) = delete;
+    TensorBuffer& operator=(const TensorBuffer&) = delete;
+    TensorBuffer(TensorBuffer&& other) noexcept 
+        : data_(std::exchange(other.data_, nullptr))
+        , size_(std::exchange(other.size_, 0)) {}
+    
+    float* data() { return static_cast<float*>(data_); }
+    size_t size() const { return size_; }
+
+private:
+    void* data_;
+    size_t size_;
+};
+
+// Aligned allocation for SIMD
+template<typename T, size_t Alignment = 64>
+class AlignedVector {
+    static_assert(Alignment >= alignof(T));
+    // ... implementation with aligned allocator
+};
+```
+
+## SIMD Optimization
+```cpp
+#include <immintrin.h>
+
+// AVX2 vectorized dot product
+float dot_product_avx2(const float* a, const float* b, size_t n) {
+    __m256 sum = _mm256_setzero_ps();
+    
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        sum = _mm256_fmadd_ps(va, vb, sum);
+    }
+    
+    // Horizontal sum
+    __m128 hi = _mm256_extractf128_ps(sum, 1);
+    __m128 lo = _mm256_castps256_ps128(sum);
+    __m128 sum128 = _mm_add_ps(hi, lo);
+    sum128 = _mm_hadd_ps(sum128, sum128);
+    sum128 = _mm_hadd_ps(sum128, sum128);
+    
+    float result = _mm_cvtss_f32(sum128);
+    
+    // Handle remainder
+    for (; i < n; ++i) {
+        result += a[i] * b[i];
+    }
+    return result;
+}
+
+// Runtime dispatch based on CPU features
+float dot_product(const float* a, const float* b, size_t n) {
+    if (cpu_supports_avx512()) return dot_product_avx512(a, b, n);
+    if (cpu_supports_avx2()) return dot_product_avx2(a, b, n);
+    return dot_product_scalar(a, b, n);
+}
+```
+
+## CUDA Kernels
+```cpp
+// cuda/gemm.cu
+__global__ void gemm_kernel(
+    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int M, int N, int K
+) {
+    // Shared memory for tiling
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+    
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+    
+    float sum = 0.0f;
+    
+    for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+        // Load tiles into shared memory
+        if (row < M && t * TILE_SIZE + threadIdx.x < K)
+            As[threadIdx.y][threadIdx.x] = A[row * K + t * TILE_SIZE + threadIdx.x];
+        else
+            As[threadIdx.y][threadIdx.x] = 0.0f;
+            
+        if (col < N && t * TILE_SIZE + threadIdx.y < K)
+            Bs[threadIdx.y][threadIdx.x] = B[(t * TILE_SIZE + threadIdx.y) * N + col];
+        else
+            Bs[threadIdx.y][threadIdx.x] = 0.0f;
+        
+        __syncthreads();
+        
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        }
+        
+        __syncthreads();
+    }
+    
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
+    }
+}
+
+// Host wrapper
+void gemm_cuda(const Tensor& A, const Tensor& B, Tensor& C) {
+    dim3 block(TILE_SIZE, TILE_SIZE);
+    dim3 grid(
+        (C.shape(1) + TILE_SIZE - 1) / TILE_SIZE,
+        (C.shape(0) + TILE_SIZE - 1) / TILE_SIZE
+    );
+    
+    gemm_kernel<<<grid, block>>>(
+        A.data(), B.data(), C.data(),
+        A.shape(0), B.shape(1), A.shape(1)
+    );
+    CUDA_CHECK(cudaGetLastError());
+}
+```
+
+## Quantization
+```cpp
+// INT8 quantization for inference
+struct QuantizedTensor {
+    std::vector<int8_t> data;
+    float scale;
+    int8_t zero_point;
+    
+    static QuantizedTensor quantize(const float* input, size_t n) {
+        // Find min/max
+        float min_val = *std::min_element(input, input + n);
+        float max_val = *std::max_element(input, input + n);
+        
+        // Compute scale and zero point
+        float scale = (max_val - min_val) / 255.0f;
+        int8_t zero_point = static_cast<int8_t>(-min_val / scale - 128);
+        
+        // Quantize
+        std::vector<int8_t> quantized(n);
+        for (size_t i = 0; i < n; ++i) {
+            int32_t q = static_cast<int32_t>(input[i] / scale) + zero_point;
+            quantized[i] = static_cast<int8_t>(std::clamp(q, -128, 127));
+        }
+        
+        return {std::move(quantized), scale, zero_point};
+    }
+};
+```
+
+## Threading
+```cpp
+#include <thread>
+#include <future>
+
+// Thread pool for inference
+class ThreadPool {
+public:
+    explicit ThreadPool(size_t num_threads = std::thread::hardware_concurrency());
+    
+    template<typename F, typename... Args>
+    auto enqueue(F&& f, Args&&... args) 
+        -> std::future<std::invoke_result_t<F, Args...>>;
+    
+    ~ThreadPool();
+
+private:
+    std::vector<std::thread> workers_;
+    std::queue<std::function<void()>> tasks_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+};
+
+// Parallel inference
+void parallel_batch_inference(
+    Model& model,
+    std::span<const Input> inputs,
+    std::span<Output> outputs
+) {
+    const size_t num_threads = std::thread::hardware_concurrency();
+    const size_t chunk_size = (inputs.size() + num_threads - 1) / num_threads;
+    
+    std::vector<std::future<void>> futures;
+    for (size_t i = 0; i < inputs.size(); i += chunk_size) {
+        size_t end = std::min(i + chunk_size, inputs.size());
+        futures.push_back(pool.enqueue([&, i, end] {
+            for (size_t j = i; j < end; ++j) {
+                outputs[j] = model.infer(inputs[j]);
+            }
+        }));
+    }
+    
+    for (auto& f : futures) f.wait();
+}
+```
+
+## Benchmarking
+```cpp
+#include <chrono>
+
+template<typename Func>
+double benchmark(Func&& f, int warmup = 10, int iterations = 100) {
+    // Warmup
+    for (int i = 0; i < warmup; ++i) {
+        f();
+    }
+    
+    // Benchmark
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; ++i) {
+        f();
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    return duration.count() / static_cast<double>(iterations);
+}
+
+// Usage
+double latency_us = benchmark([&] {
+    model.infer(input, output);
+});
+std::cout << "Latency: " << latency_us << " us\n";
+std::cout << "Throughput: " << 1e6 / latency_us << " inferences/sec\n";
+```
+
+## Build Configuration (CMake)
+```cmake
+cmake_minimum_required(VERSION 3.18)
+project(inference LANGUAGES CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Optimization flags
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
+
+# CUDA
+find_package(CUDA REQUIRED)
+set(CMAKE_CUDA_ARCHITECTURES 70 75 80 86)
+
+# Threading
+find_package(Threads REQUIRED)
+
+add_library(inference
+    src/model.cpp
+    src/tensor.cpp
+    cuda/gemm.cu
+)
+
+target_include_directories(inference PUBLIC include)
+target_link_libraries(inference Threads::Threads ${CUDA_LIBRARIES})
+```
+
+## Performance Checklist
+- [ ] Memory aligned to cache lines (64 bytes)
+- [ ] SIMD vectorization verified (check assembly)
+- [ ] Cache-friendly data layout (SoA vs AoS)
+- [ ] Thread affinity set for NUMA systems
+- [ ] GPU memory transfers minimized
+- [ ] Kernel occupancy optimized
+- [ ] Quantization applied where accuracy permits
+- [ ] Batch processing for throughput

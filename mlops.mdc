@@ -1,0 +1,418 @@
+---
+description: MLOps standards for production ML systems including pipelines, experiment tracking, model registry, monitoring, and CI/CD. Separates toy projects from real products.
+globs: ["*.py", "**/pipelines/**", "**/mlops/**", "**/.github/**", "**/dvc*"]
+alwaysApply: false
+---
+
+# MLOps Rules
+
+## MLOps Maturity Levels
+```
+Level 0: Manual, notebook-driven
+Level 1: ML pipeline automation
+Level 2: CI/CD pipeline automation
+Level 3: Full ML system automation with monitoring
+```
+
+## Project Structure
+```
+project/
+├── .github/
+│   └── workflows/
+│       ├── train.yml
+│       ├── test.yml
+│       └── deploy.yml
+├── configs/
+│   ├── train_config.yaml
+│   └── serve_config.yaml
+├── data/
+│   ├── raw/              # Immutable, versioned with DVC
+│   └── processed/
+├── pipelines/
+│   ├── data_pipeline.py
+│   ├── training_pipeline.py
+│   └── inference_pipeline.py
+├── src/
+│   ├── data/
+│   ├── features/
+│   ├── models/
+│   └── serving/
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── model/            # Model quality tests
+├── monitoring/
+│   └── dashboards/
+├── dvc.yaml              # Data pipeline definition
+├── params.yaml           # Hyperparameters
+└── Dockerfile
+```
+
+## Data Versioning (DVC)
+```yaml
+# dvc.yaml
+stages:
+  prepare:
+    cmd: python pipelines/prepare_data.py
+    deps:
+      - data/raw/
+      - src/data/prepare.py
+    params:
+      - prepare.split_ratio
+    outs:
+      - data/processed/train.parquet
+      - data/processed/val.parquet
+
+  train:
+    cmd: python pipelines/train.py
+    deps:
+      - data/processed/
+      - src/models/
+    params:
+      - train
+    outs:
+      - models/model.pt
+    metrics:
+      - metrics/train_metrics.json:
+          cache: false
+    plots:
+      - metrics/loss_curve.csv:
+          x: step
+          y: loss
+
+  evaluate:
+    cmd: python pipelines/evaluate.py
+    deps:
+      - models/model.pt
+      - data/processed/test.parquet
+    metrics:
+      - metrics/eval_metrics.json:
+          cache: false
+```
+
+```bash
+# Data versioning commands
+dvc init
+dvc add data/raw/dataset.csv
+dvc push
+dvc pull
+dvc repro  # Reproduce pipeline
+```
+
+## Experiment Tracking (MLflow/W&B)
+```python
+import mlflow
+from mlflow.tracking import MlflowClient
+
+# MLflow setup
+mlflow.set_tracking_uri("http://mlflow-server:5000")
+mlflow.set_experiment("my-experiment")
+
+# Log experiment
+with mlflow.start_run(run_name="baseline-v1") as run:
+    # Log parameters
+    mlflow.log_params({
+        "learning_rate": 1e-4,
+        "batch_size": 32,
+        "model_type": "transformer",
+    })
+    
+    # Train model
+    for epoch in range(num_epochs):
+        train_loss = train_epoch(model, train_loader)
+        val_loss, val_metrics = evaluate(model, val_loader)
+        
+        # Log metrics
+        mlflow.log_metrics({
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            **val_metrics,
+        }, step=epoch)
+    
+    # Log model
+    mlflow.pytorch.log_model(
+        model,
+        "model",
+        registered_model_name="my-model",
+    )
+    
+    # Log artifacts
+    mlflow.log_artifact("configs/train_config.yaml")
+    mlflow.log_artifact("metrics/confusion_matrix.png")
+
+# Model registry
+client = MlflowClient()
+client.transition_model_version_stage(
+    name="my-model",
+    version=1,
+    stage="Production",
+)
+```
+
+## Feature Store
+```python
+from feast import FeatureStore, Entity, FeatureView, Field
+from feast.types import Float32, Int64
+
+# feature_store.yaml
+# project: my_project
+# registry: data/registry.db
+# provider: local
+# online_store:
+#   type: sqlite
+#   path: data/online_store.db
+
+# Define entity
+user = Entity(
+    name="user_id",
+    join_keys=["user_id"],
+)
+
+# Define feature view
+user_features = FeatureView(
+    name="user_features",
+    entities=[user],
+    ttl=timedelta(days=1),
+    schema=[
+        Field(name="avg_purchase", dtype=Float32),
+        Field(name="total_orders", dtype=Int64),
+        Field(name="days_since_last_order", dtype=Int64),
+    ],
+    source=user_source,
+)
+
+# Retrieve features
+store = FeatureStore(repo_path=".")
+
+# Historical features for training
+training_df = store.get_historical_features(
+    entity_df=entity_df,
+    features=[
+        "user_features:avg_purchase",
+        "user_features:total_orders",
+    ],
+).to_df()
+
+# Online features for inference
+feature_vector = store.get_online_features(
+    features=["user_features:avg_purchase"],
+    entity_rows=[{"user_id": 123}],
+).to_dict()
+```
+
+## Model Serving (FastAPI)
+```python
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import torch
+
+app = FastAPI(title="ML Model API", version="1.0.0")
+
+# Load model at startup
+model = None
+
+@app.on_event("startup")
+async def load_model():
+    global model
+    model = torch.jit.load("models/model.pt")
+    model.eval()
+
+class PredictionRequest(BaseModel):
+    features: list[float]
+
+class PredictionResponse(BaseModel):
+    prediction: float
+    confidence: float
+    model_version: str
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict(request: PredictionRequest):
+    try:
+        with torch.no_grad():
+            input_tensor = torch.tensor([request.features])
+            output = model(input_tensor)
+            prediction = output.argmax(dim=1).item()
+            confidence = torch.softmax(output, dim=1).max().item()
+        
+        return PredictionResponse(
+            prediction=prediction,
+            confidence=confidence,
+            model_version="1.0.0",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "model_loaded": model is not None}
+```
+
+## CI/CD Pipeline (GitHub Actions)
+```yaml
+# .github/workflows/ml-pipeline.yml
+name: ML Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+      
+      - name: Run unit tests
+        run: pytest tests/unit --cov=src
+      
+      - name: Run model tests
+        run: pytest tests/model
+
+  train:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up DVC
+        uses: iterative/setup-dvc@v1
+      
+      - name: Pull data
+        run: dvc pull
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      
+      - name: Run training pipeline
+        run: dvc repro
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      
+      - name: Push results
+        run: dvc push
+
+  deploy:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to production
+        run: |
+          # Deploy logic here
+          echo "Deploying model..."
+```
+
+## Model Monitoring
+```python
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+import time
+
+# Define metrics
+PREDICTION_COUNTER = Counter(
+    "model_predictions_total",
+    "Total predictions",
+    ["model_version", "prediction_class"],
+)
+
+LATENCY_HISTOGRAM = Histogram(
+    "model_prediction_latency_seconds",
+    "Prediction latency",
+    buckets=[0.01, 0.05, 0.1, 0.5, 1.0],
+)
+
+FEATURE_DRIFT = Gauge(
+    "model_feature_drift",
+    "Feature drift score",
+    ["feature_name"],
+)
+
+# Instrumented prediction
+def predict_with_monitoring(model, features):
+    start_time = time.time()
+    
+    prediction = model.predict(features)
+    
+    # Record metrics
+    latency = time.time() - start_time
+    LATENCY_HISTOGRAM.observe(latency)
+    PREDICTION_COUNTER.labels(
+        model_version="1.0.0",
+        prediction_class=str(prediction),
+    ).inc()
+    
+    return prediction
+
+# Data drift detection
+from scipy import stats
+
+def detect_drift(reference_data, production_data, threshold=0.05):
+    """Kolmogorov-Smirnov test for drift detection."""
+    drift_scores = {}
+    for feature in reference_data.columns:
+        statistic, p_value = stats.ks_2samp(
+            reference_data[feature],
+            production_data[feature],
+        )
+        drift_scores[feature] = {
+            "statistic": statistic,
+            "p_value": p_value,
+            "drift_detected": p_value < threshold,
+        }
+        FEATURE_DRIFT.labels(feature_name=feature).set(statistic)
+    return drift_scores
+```
+
+## Docker Configuration
+```dockerfile
+# Dockerfile
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY src/ ./src/
+COPY models/ ./models/
+COPY configs/ ./configs/
+
+# Run as non-root user
+RUN useradd -m appuser
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+EXPOSE 8000
+
+CMD ["uvicorn", "src.serving.app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+## Production Checklist
+- [ ] Data versioning configured (DVC/Git LFS)
+- [ ] Experiment tracking enabled (MLflow/W&B)
+- [ ] Model registry in use
+- [ ] Feature store for consistency
+- [ ] CI/CD pipeline configured
+- [ ] Model tests in pipeline
+- [ ] Monitoring dashboards deployed
+- [ ] Alerting configured (latency, drift, errors)
+- [ ] Rollback procedure documented
+- [ ] A/B testing framework ready
+- [ ] Model cards / documentation
+- [ ] Security review completed

@@ -1,0 +1,75 @@
+---
+description: Foundational coding standards and AI interaction rules. Always active.
+alwaysApply: true
+---
+
+# Core Engineering Rules
+
+## Context First
+- DO NOT write code until you understand the system
+- List files in target directory before changes
+- Identify and follow existing patterns
+- Ask clarifying questions if requirements are ambiguous
+
+## Code Quality Standards
+
+### Simplicity
+- Prefer simple, readable solutions over clever ones
+- Each function does one thing well
+- Avoid premature optimization
+- Implement what's needed now, not speculative features
+
+### Error Handling
+- Handle errors at function boundaries
+- Use early returns for error conditions
+- Provide meaningful error messages
+- Log errors with sufficient context
+
+### Naming
+- Names communicate purpose clearly
+- Functions: verb_noun (get_user, validate_input)
+- Variables: descriptive nouns (user_count, is_valid)
+- Constants: SCREAMING_SNAKE_CASE
+- Match existing project conventions
+
+### Comments
+- Explain WHY, not WHAT
+- Document non-obvious decisions
+- Update comments when changing code
+- Delete outdated comments
+
+## Change Management
+
+### Small Changes
+- One logical change per commit
+- Include related tests and docs
+- Changes should be reviewable in <30 minutes
+
+### Testing
+- Write tests for new functionality
+- Tests should fail when code breaks
+- Cover edge cases and error paths
+- Run existing tests before committing
+
+### Documentation
+- Update docs with code changes
+- README for setup and overview
+- Inline docs for complex logic
+
+## AI Interaction
+
+### Before Generating Code
+1. Confirm understanding of requirements
+2. Identify files that will be modified
+3. Note patterns to follow from existing code
+
+### When Generating Code
+- Match existing code style exactly
+- Use libraries already in the project
+- Follow established folder structure
+- Include appropriate error handling
+
+### After Generating Code
+- Verify no regressions in existing tests
+- Confirm new code integrates properly
+- Check for type errors and linting issues

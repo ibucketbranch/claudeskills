@@ -1,0 +1,447 @@
+---
+description: AI infrastructure patterns for silicon-aware design, GPU/TPU optimization, model serving at scale, and hardware-efficient inference. The future of AI engineering.
+globs: ["*.py", "**/infra/**", "**/serving/**", "**/cuda/**", "*.cu"]
+alwaysApply: false
+---
+
+# AI Infrastructure Rules
+
+## Hardware Landscape
+
+### GPU Hierarchy (NVIDIA)
+```
+Consumer: RTX 4090 (24GB) - Development, small inference
+Professional: A100 (40/80GB) - Training, large models
+Datacenter: H100 (80GB) - Large-scale training, inference
+```
+
+### Memory Bandwidth Matters
+```
+H100 SXM: 3.35 TB/s
+A100 SXM: 2.0 TB/s
+RTX 4090: 1.0 TB/s
+
+Rule: LLM inference is memory-bound, not compute-bound
+Throughput ≈ Memory Bandwidth / Model Size
+```
+
+## GPU Memory Optimization
+
+### Memory Estimation
+```python
+def estimate_model_memory(
+    num_params: int,
+    dtype: str = "fp16",
+    batch_size: int = 1,
+    seq_len: int = 2048,
+    hidden_size: int = 4096,
+) -> dict:
+    """Estimate GPU memory requirements."""
+    
+    bytes_per_param = {"fp32": 4, "fp16": 2, "bf16": 2, "int8": 1, "int4": 0.5}
+    
+    # Model weights
+    weight_memory = num_params * bytes_per_param[dtype]
+    
+    # Optimizer states (Adam: 2x for momentum + variance)
+    optimizer_memory = num_params * 8 if dtype == "fp32" else num_params * 4
+    
+    # Activations (rough estimate)
+    activation_memory = batch_size * seq_len * hidden_size * bytes_per_param[dtype] * 12
+    
+    # Gradients
+    gradient_memory = weight_memory
+    
+    return {
+        "weights_gb": weight_memory / 1e9,
+        "optimizer_gb": optimizer_memory / 1e9,
+        "activations_gb": activation_memory / 1e9,
+        "gradients_gb": gradient_memory / 1e9,
+        "total_training_gb": (weight_memory + optimizer_memory + activation_memory + gradient_memory) / 1e9,
+        "inference_gb": (weight_memory + activation_memory) / 1e9,
+    }
+
+# 7B model example
+print(estimate_model_memory(7e9, "fp16"))
+# weights: 14GB, inference: ~16GB, training: ~56GB
+```
+
+### Memory-Efficient Training
+```python
+import torch
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+
+# Gradient checkpointing
+model.gradient_checkpointing_enable()
+
+# FSDP for multi-GPU
+fsdp_config = {
+    "sharding_strategy": ShardingStrategy.FULL_SHARD,
+    "mixed_precision": MixedPrecision(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat16,
+        buffer_dtype=torch.bfloat16,
+    ),
+    "cpu_offload": CPUOffload(offload_params=True),
+}
+
+model = FSDP(model, **fsdp_config)
+
+# DeepSpeed ZeRO
+# ds_config.json
+{
+    "zero_optimization": {
+        "stage": 3,
+        "offload_optimizer": {"device": "cpu"},
+        "offload_param": {"device": "cpu"},
+        "overlap_comm": true,
+        "contiguous_gradients": true,
+    },
+    "bf16": {"enabled": true},
+    "gradient_clipping": 1.0,
+}
+```
+
+## Quantization
+
+### Post-Training Quantization
+```python
+import torch
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
+# 4-bit quantization with bitsandbytes
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True,
+)
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-2-7b-hf",
+    quantization_config=bnb_config,
+    device_map="auto",
+)
+
+# GPTQ quantization
+from auto_gptq import AutoGPTQForCausalLM
+
+model = AutoGPTQForCausalLM.from_quantized(
+    "TheBloke/Llama-2-7B-GPTQ",
+    use_safetensors=True,
+    device="cuda:0",
+)
+
+# AWQ quantization
+from awq import AutoAWQForCausalLM
+
+model = AutoAWQForCausalLM.from_quantized(
+    "TheBloke/Llama-2-7B-AWQ",
+    fuse_layers=True,
+)
+```
+
+### Quantization Trade-offs
+```
+FP32: Baseline accuracy, 4 bytes/param
+FP16/BF16: ~Same accuracy, 2 bytes/param
+INT8: <1% accuracy loss, 1 byte/param
+INT4: 1-3% accuracy loss, 0.5 bytes/param
+
+Rule: Start with INT8, go to INT4 if memory-constrained
+```
+
+## Inference Optimization
+
+### KV Cache Optimization
+```python
+# PagedAttention (vLLM)
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf",
+    tensor_parallel_size=1,
+    gpu_memory_utilization=0.9,
+    max_model_len=4096,
+)
+
+sampling_params = SamplingParams(
+    temperature=0.7,
+    top_p=0.9,
+    max_tokens=256,
+)
+
+outputs = llm.generate(prompts, sampling_params)
+
+# Continuous batching
+# vLLM handles this automatically
+# Key: Dynamic batch formation for better GPU utilization
+```
+
+### Speculative Decoding
+```python
+# Use smaller draft model to propose tokens
+# Large model verifies in parallel
+
+from transformers import AutoModelForCausalLM
+
+target_model = AutoModelForCausalLM.from_pretrained("llama-70b")
+draft_model = AutoModelForCausalLM.from_pretrained("llama-7b")
+
+# Speculative decoding generates multiple tokens per forward pass
+# Speedup: 2-3x for well-matched draft/target pairs
+```
+
+### Flash Attention
+```python
+# Enable Flash Attention 2
+from transformers import AutoModelForCausalLM
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-2-7b-hf",
+    torch_dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
+)
+
+# Memory: O(N) instead of O(N²)
+# Speed: 2-4x faster attention
+```
+
+## Model Serving at Scale
+
+### TensorRT-LLM
+```python
+# Build optimized engine
+import tensorrt_llm
+
+# Convert model
+builder = tensorrt_llm.Builder()
+network = builder.create_network()
+
+# Build with optimizations
+engine = builder.build_engine(
+    network,
+    builder_config={
+        "precision": "fp16",
+        "max_batch_size": 64,
+        "max_input_len": 2048,
+        "max_output_len": 512,
+    }
+)
+
+# Save engine
+engine.save("model.engine")
+```
+
+### Triton Inference Server
+```python
+# config.pbtxt
+name: "llama"
+platform: "tensorrt_llm"
+max_batch_size: 64
+
+input [
+    {
+        name: "input_ids"
+        data_type: TYPE_INT32
+        dims: [-1]
+    }
+]
+
+output [
+    {
+        name: "output_ids"
+        data_type: TYPE_INT32
+        dims: [-1]
+    }
+]
+
+instance_group [
+    {
+        count: 1
+        kind: KIND_GPU
+        gpus: [0]
+    }
+]
+
+dynamic_batching {
+    preferred_batch_size: [8, 16, 32]
+    max_queue_delay_microseconds: 100
+}
+```
+
+### Load Balancing
+```yaml
+# Kubernetes deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-inference
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: llm-inference
+  template:
+    spec:
+      containers:
+        - name: inference
+          image: llm-inference:latest
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-inference
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 80
+      targetPort: 8000
+  selector:
+    app: llm-inference
+```
+
+## Multi-GPU Strategies
+
+### Tensor Parallelism
+```python
+# Split model layers across GPUs
+# Good for: Large models that don't fit on single GPU
+# Latency: Lower (single request uses all GPUs)
+# Throughput: Limited by communication
+
+from vllm import LLM
+model = LLM(model_path, tensor_parallel_size=4)
+```
+
+### Pipeline Parallelism
+```python
+# Split model stages across GPUs
+# Good for: Very deep models
+# Latency: Higher (sequential stages)
+# Throughput: Higher with micro-batching
+```
+
+### Data Parallelism
+```python
+# Replicate model across GPUs
+# Good for: Serving (each GPU handles different requests)
+# Latency: Same as single GPU
+# Throughput: Linear scaling
+```
+
+## Cost Optimization
+
+### Spot/Preemptible Instances
+```python
+# Checkpoint frequently for spot instances
+checkpoint_every_n_steps = 100
+
+# Graceful shutdown handler
+import signal
+
+def handle_preemption(signum, frame):
+    save_checkpoint(model, optimizer, step)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, handle_preemption)
+```
+
+### Right-Sizing
+```
+# Inference hardware selection
+Model Size | Recommended GPU
+< 7B      | T4, L4, RTX 4090
+7B-13B    | A10G, L40
+13B-70B   | A100 40GB, H100
+70B+      | Multi-GPU A100/H100
+```
+
+## Silicon Roadmap Awareness
+
+### Current Generation
+- NVIDIA H100: Transformer Engine, FP8
+- AMD MI300X: Competitive HBM3
+- Intel Gaudi2: Cost-effective training
+
+### Emerging
+- NVIDIA B100/B200: Next-gen, 2x H100
+- Groq LPU: Deterministic inference
+- Custom ASICs: Google TPU, AWS Trainium
+
+### Design for Portability
+```python
+# Abstract hardware-specific code
+class Accelerator:
+    @abstractmethod
+    def to_device(self, tensor): ...
+    
+    @abstractmethod
+    def compile_model(self, model): ...
+
+class CUDAAccelerator(Accelerator):
+    def to_device(self, tensor):
+        return tensor.cuda()
+    
+    def compile_model(self, model):
+        return torch.compile(model, backend="inductor")
+
+# Factory pattern for hardware selection
+def get_accelerator(device_type: str) -> Accelerator:
+    accelerators = {
+        "cuda": CUDAAccelerator,
+        "tpu": TPUAccelerator,
+        "cpu": CPUAccelerator,
+    }
+    return accelerators[device_type]()
+```
+
+## Performance Benchmarking
+```python
+import time
+import torch
+
+def benchmark_inference(
+    model,
+    input_ids,
+    num_warmup: int = 10,
+    num_runs: int = 100,
+) -> dict:
+    """Benchmark inference latency and throughput."""
+    
+    # Warmup
+    for _ in range(num_warmup):
+        with torch.no_grad():
+            _ = model.generate(input_ids, max_new_tokens=1)
+    
+    torch.cuda.synchronize()
+    
+    # Benchmark
+    latencies = []
+    for _ in range(num_runs):
+        start = time.perf_counter()
+        with torch.no_grad():
+            output = model.generate(input_ids, max_new_tokens=128)
+        torch.cuda.synchronize()
+        latencies.append(time.perf_counter() - start)
+    
+    tokens_generated = 128 * num_runs
+    total_time = sum(latencies)
+    
+    return {
+        "mean_latency_ms": (sum(latencies) / num_runs) * 1000,
+        "p50_latency_ms": sorted(latencies)[num_runs // 2] * 1000,
+        "p99_latency_ms": sorted(latencies)[int(num_runs * 0.99)] * 1000,
+        "throughput_tokens_per_sec": tokens_generated / total_time,
+    }
+```

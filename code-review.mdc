@@ -1,0 +1,150 @@
+---
+description: Code review workflow rules based on Google engineering practices. Activate when reviewing code, creating PRs, or discussing code quality.
+alwaysApply: true
+---
+
+# Code Review Rules
+
+## Review Checklist
+
+Apply to every code change:
+
+### 1. Design
+- [ ] Change belongs in this codebase
+- [ ] Well-integrated with existing system
+- [ ] Right level of abstraction
+- [ ] No unnecessary coupling
+
+### 2. Functionality
+- [ ] Does what author intended
+- [ ] Handles edge cases
+- [ ] No security vulnerabilities
+- [ ] Good for end users AND future developers
+
+### 3. Complexity
+- [ ] Could any part be simpler?
+- [ ] Easy to understand on first read
+- [ ] No over-engineering
+- [ ] No premature optimization
+
+### 4. Tests
+- [ ] Tests exist for new functionality
+- [ ] Tests are correct and meaningful
+- [ ] Tests cover edge cases
+- [ ] Tests will fail when code breaks
+
+### 5. Naming
+- [ ] Names are clear and descriptive
+- [ ] Follow project conventions
+- [ ] No abbreviations without context
+- [ ] Names match purpose
+
+### 6. Comments
+- [ ] Explain WHY, not WHAT
+- [ ] Non-obvious decisions documented
+- [ ] No outdated comments
+- [ ] Complex regex/algorithms explained
+
+### 7. Style
+- [ ] Follows style guide
+- [ ] Consistent with surrounding code
+- [ ] Formatting is correct
+- [ ] No unnecessary changes
+
+### 8. Documentation
+- [ ] README updated if needed
+- [ ] API docs updated
+- [ ] Inline docs for complex logic
+- [ ] Migration guide if breaking changes
+
+## Giving Feedback
+
+### Comment Types
+```
+# Required change
+This needs to handle the null case.
+
+# Suggestion (optional)
+Nit: Consider renaming to `getUserById` for clarity.
+
+# Question
+Why was this approach chosen over X?
+
+# Positive feedback
+Nice use of the builder pattern here!
+```
+
+### Principles
+- Be specific and actionable
+- Explain WHY, not just WHAT
+- Offer alternatives, not just criticism
+- Acknowledge good work
+- Focus on code, not person
+
+## Responding to Reviews
+
+### Author Responsibilities
+- Address all comments
+- Explain reasoning if disagreeing
+- Keep changes small
+- Respond promptly
+- Thank reviewers
+
+### When to Push Back
+- Reviewer misunderstands context → Explain clearly
+- Suggestion would hurt performance → Show data
+- Style preference vs project standard → Cite standard
+- Scope creep → Propose follow-up PR
+
+## PR/CL Description Template
+
+```markdown
+## Summary
+[One-line description of what this change does]
+
+## Context
+[Why is this change needed? Link to issue/design doc]
+
+## Changes
+- [Bullet point of main changes]
+- [Keep it high-level]
+
+## Testing
+- [ ] Unit tests added/updated
+- [ ] Integration tests pass
+- [ ] Manual testing done: [describe what you tested]
+
+## Checklist
+- [ ] Code follows style guide
+- [ ] Documentation updated
+- [ ] No breaking changes (or documented)
+```
+
+## Review Speed
+
+- **Initial response**: Same business day
+- **Full review**: Within 24 hours
+- **Author response**: Within 24 hours
+- **Don't block**: Use "LGTM with comments" when appropriate
+
+## LGTM Guidelines
+
+Approve when:
+- Overall change improves code health
+- Remaining issues are minor
+- Confident author will address comments
+- No blocking concerns
+
+Don't approve when:
+- Security issues present
+- Tests missing or broken
+- Fundamental design problems
+- Breaking changes undocumented
+
+## Conflict Resolution
+
+1. Developer and reviewer discuss
+2. Video call if text isn't working
+3. Bring in third party
+4. Escalate to tech lead if needed
+5. **Never block indefinitely**
